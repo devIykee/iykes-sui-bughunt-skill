@@ -216,9 +216,86 @@ condition the fix on payment.
 
 ## STEP 11 - Frontend security audit (always check)
 
-Scrape the dApp bundle for leaked keys, hardcoded package IDs that differ from the
-live ones, PTB construction that passes user-controlled object IDs or coin types,
-and missing slippage or deadline arguments.
+**Run this step for every hunt, regardless of product type.** Frontend issues can
+be as critical as Move bugs — especially **unauthenticated server / API /
+database access** reachable from the dApp, plus exposed API keys that control
+RPC access, sponsorship, or authentication.
+
+### 11A. Bundle scrape (Sui-specific + secrets)
+
+Scrape the dApp bundle for:
+- leaked keys (Bearer, service-role, sponsor / gas-station keys, private keys)
+- hardcoded package IDs that differ from the live ones
+- PTB construction that passes user-controlled object IDs or coin types
+- missing slippage or deadline arguments
+- every API base URL, GraphQL endpoint, Firebase / Supabase config, webhook path
+
+Save hits under `frontend-security/` (bundle extract, endpoint list, key greps).
+
+### 11B. Unauthenticated server / database access (primary frontend hunt goal)
+
+**When hunting a frontend, exposed secrets are one path. The other — and often
+higher-impact — path is unauthenticated (or under-authenticated) access to the
+project's backend, APIs, or database.** Treat this as a first-class objective of
+Step 11, not an afterthought.
+
+You are looking for ways a stranger (no session, no wallet signature, no admin
+cookie) can:
+
+1. **Read or write the database** — open Firebase / Supabase / Appwrite / Hasura
+   rules, leaked service-role keys, GraphQL that accepts mutations without auth,
+   REST that creates / updates / deletes rows without a check.
+2. **Call privileged server endpoints** — `/admin`, `/internal`, `/debug`,
+   webhooks with no shared-secret, unsigned cloud-function URLs, open CORS +
+   cookie-less state-changing POSTs.
+3. **Bypass auth on user actions** — IDOR (change `userId` / `address` /
+   `suiAddress` in the request and hit another account), missing ownership
+   checks on update/delete, unsigned "claim" / "payout" / "credit" APIs that
+   trust a client-supplied address.
+4. **Abuse storage / queues** — public S3 / GCS / R2 buckets writable by anyone,
+   open Redis / Mongo endpoints, message queues that accept unauthenticated
+   publish.
+5. **Chain a frontend secret into server access** — a leaked Bearer / service key
+   that unlocks (1)–(4). Rate-limit-only keys are usually Low; keys that mutate
+   production data are High/Critical.
+
+**How to hunt (read-only / non-destructive first):**
+- From the bundle, list every API base URL, GraphQL endpoint, Firebase config,
+  Supabase URL + `anon` / `service_role` key, and webhook path.
+- For each write-shaped endpoint (`POST`/`PUT`/`PATCH`/`DELETE`, GraphQL
+  mutation, Firebase `.set` / `.update`, Supabase `.insert` / `.upsert`):
+  try the call **without** cookies, Authorization headers, or wallet signatures.
+  Document status codes and whether the mutation stuck.
+- Check Firebase / Supabase security rules if the project is public or the
+  rules file ships in the bundle / repo. Look for `allow read, write: if true`
+  and `service_role` used from the client.
+- IDOR: replay a legitimate update with a different `id` / `suiAddress` /
+  `userId`.
+- Never dump production user data, never delete, never spam write volume. One
+  inert prove-it row (or a dry-run that the server rejects after the auth check)
+  is enough for the PoC. Prefer staging / the project's own test fixtures when
+  available.
+
+**Severity (honest):**
+- Unauthenticated **write** that changes balances, credits, inventory, roles, or
+  payouts → Critical / High (map to the program's payout table).
+- Unauthenticated **read** of PII, private keys, or full DB dumps → High.
+- Unauthenticated read of non-sensitive public-ish data, or write that only
+  affects the attacker's own empty sandbox → Low / Informational.
+- Exposed `anon` keys that are designed to be public (Supabase anon with tight
+  RLS) are not findings unless RLS actually fails.
+
+Record every tested endpoint in `frontend-security/api-auth-matrix.md`
+(method, path, auth required?, stranger result, data impact). Failures to
+mutate as a stranger go in the kill-log, not the findings table.
+
+### 11C. Operating note
+
+Frontend security is mandatory on every Sui hunt. Hardcoded API keys, bearer
+tokens, leaked keypairs, and sponsor keys can be as critical as Move bugs. Also
+hunt for unauthenticated (or under-authenticated) server, API, and database
+access reachable from the frontend — open write endpoints, IDOR, and
+misconfigured Firebase/Supabase/GraphQL are primary targets (see 11B).
 
 ## Appendix A - Sui cheat-sheet
 
